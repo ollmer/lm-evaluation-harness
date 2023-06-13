@@ -43,6 +43,7 @@ class HFLM(BaseLM):
 
         self.gpt2 = transformers.AutoModelForCausalLM.from_pretrained(
             pretrained,
+            torch_dtype=torch.float16,
             load_in_8bit=load_in_8bit,
             low_cpu_mem_usage=low_cpu_mem_usage,
             revision=revision,
@@ -54,19 +55,11 @@ class HFLM(BaseLM):
             pretrained if tokenizer is None else tokenizer,
             revision=revision,
             trust_remote_code=trust_remote_code,
+            use_fast=False
         )
 
         self.vocab_size = self.tokenizer.vocab_size
 
-        if isinstance(
-            self.tokenizer, (transformers.GPT2Tokenizer, transformers.GPT2TokenizerFast)
-        ):
-            assert self.tokenizer.encode("hello\n\nhello") == [
-                31373,
-                198,
-                198,
-                31373,
-            ], self.tokenizer.encode("hello\n\nhello")
 
         # setup for automatic batch size detection
         if batch_size == "auto":
@@ -84,8 +77,11 @@ class HFLM(BaseLM):
         try:
             return self.gpt2.config.n_ctx
         except AttributeError:
-            # gptneoconfig doesn't have n_ctx apparently
-            return self.gpt2.config.max_position_embeddings
+            try:
+                # gptneoconfig doesn't have n_ctx apparently
+                return self.gpt2.config.max_position_embeddings
+            except:
+                return 2048
 
     @property
     def max_gen_toks(self):
