@@ -152,19 +152,22 @@ SUBJECT_TO_CATEGORY = {
 class MMLUTemplate:
     def __init__(
         self,
+        main_template,
         description,
         sample,
         choice,
-        delimiter,
+        samples_delimiter,
+        choices_delimiter,
         choices_names,
         shuffle_choices=False,
         use_choice_text=False,
     ):
+        self.main_template = main_template
         self.description = description
         self.sample = sample
         self.choice = choice
-        self.delimiter = delimiter
-        assert len(choices_names) == 4
+        self.samples_delimiter = samples_delimiter
+        self.choices_delimiter = choices_delimiter
         self.choices_names = choices_names
         self.shuffle_choices = shuffle_choices
         self.use_choice_text = use_choice_text
@@ -172,10 +175,15 @@ class MMLUTemplate:
     def render(self, doc, fewshot_docs=None):
         description = self.description.format(subject=self.format_subject(doc["subject"]))
         doc = self.prepare_choices(doc)
-        doc["answer_choice"] = "{answer_choice}"
+        doc["answer_text"] = "{answer_text}"
         sample = self.sample.format(**doc)
         fewshots = self.render_fewshots(fewshot_docs)
-        return f"{description}{self.delimiter}{fewshots}{sample}", doc
+        doc["_representation"] = self.main_template.format(
+            description=description,
+            fewshots=fewshots,
+            sample=sample
+        )
+        return doc
 
     def render_fewshots(self, fewshot_docs):
         if fewshot_docs is None:
@@ -185,7 +193,7 @@ class MMLUTemplate:
             fewshot = self.prepare_choices(fewshot)
             fewshot_sample = self.sample.format(**fewshot)
             fewshot_samples.append(fewshot_sample)
-        return self.delimiter.join(fewshot_samples) + self.delimiter
+        return self.samples_delimiter.join(fewshot_samples)
 
     def prepare_choices(self, doc):
         choices = doc["choices"]
@@ -194,10 +202,12 @@ class MMLUTemplate:
             indexes = np.random.shuffle(list(range(len(choices))))
             choices = [choices[i] for i in indexes]
             answer = indexes.index(answer)
+        choices_texts = []
         for i in range(len(choices)):
-            doc[f"choice{i}"] = self.choice.format(choice_name=self.choices_names[i], choice_text=choices[i])
+            choices_texts.append(self.choice.format(choice_name=self.choices_names[i], choice_text=choices[i]))
+        doc["choices_text"] = self.choices_delimiter.join(choices_texts)
         doc["possible_answers"] = choices if self.use_choice_text else self.choices_names
-        doc["answer_choice"] = doc["possible_answers"][answer]
+        doc["answer_text"] = doc["possible_answers"][answer]
         doc["gold"] = answer
         return doc
 
@@ -215,10 +225,12 @@ class MultiMMLU(MultipleChoiceTask):
         super().__init__()
         self.templates = {
             "default": MMLUTemplate(
+                "{description}\n\n{fewshots}\n{sample}",
                 description="The following are multiple choice questions (with answers) about {subject}.",
-                sample="{question}\n{choice0}\n{choice1}\n{choice2}\n{choice3}\nAnswer: {answer_choice}",
+                sample="{question}\n{choices_text}\nAnswer: {answer_text}",
                 choice="{choice_name}. {choice_text}",
-                delimiter="\n\n",
+                samples_delimiter="\n\n",
+                choices_delimiter="\n",
                 choices_names=["A", "B", "C", "D"],
                 shuffle_choices=False,
             )
@@ -245,9 +257,7 @@ class MultiMMLU(MultipleChoiceTask):
                     "subject", [subject] * len(split_dataset)
                 )
                 datasets[split].append(split_dataset)
-            if i >= 0:
-                break
-            i += 1
+            break
 
         self.dataset = concatenate_datasets(datasets["test"])
         print("Test set size:", len(self.dataset))
@@ -274,13 +284,14 @@ class MultiMMLU(MultipleChoiceTask):
         subject = doc["subject"]
         template = self.templates[template_id]
         fewshot_docs = list(self.fewshot_docs[subject])[:num_fewshot]
-        text, doc = template.render(doc, fewshot_docs)
-        return text, doc
+        return template.render(doc, fewshot_docs)
 
-    def construct_requests(self, _, ctx):
-        text, updated_doc = ctx
-        context, continuation = text.split("{answer_choice}", maxsplit=1)
-        variants = [(context, answer_choice + continuation) for answer_choice in updated_doc["possible_answers"]]
+    def construct_requests(self, _, doc):
+        context, continuation = doc["_representation"].split(doc["answer_text"], maxsplit=1)
+        variants = [(context, answer_choice + continuation) for answer_choice in doc["possible_answers"]]
+        print(variants[0][0]+variants[0][1])
+        print("-----")
+        exit()
         return [rf.loglikelihood(*v)[0] for v in variants]
 
     def process_results(self, doc, results):
